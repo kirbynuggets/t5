@@ -61,40 +61,83 @@ SRC_PREFIX = "translate Khasi to English: " if IS_KHASI_TO_ENGLISH else "transla
 TGT_PREFIX = "translate English to Khasi: " if IS_KHASI_TO_ENGLISH else "translate Khasi to English: "
 
 # Load the dataset
+# Fix for the dataset loading function
 def load_dataset(tsv_file_path):
     logger.info(f"Loading dataset from {tsv_file_path}")
+    
+    # Check if file exists
+    if not os.path.exists(tsv_file_path):
+        logger.error(f"File not found: {tsv_file_path}")
+        return pd.DataFrame(columns=['source', 'target'])
+    
+    # Get file size
+    file_size = os.path.getsize(tsv_file_path)
+    logger.info(f"File size: {file_size / (1024*1024):.2f} MB")
+    
+    # Try multiple methods to load the data
+    sources = []
+    targets = []
+    
     try:
-        # The file has \t \t \t \t \t as the end marker
-        # Assuming the format is source \t target \t \t \t \t \t
-        with open(tsv_file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        sources = []
-        targets = []
-        for line in lines:
-            # Replace the end marker
-            line = line.replace("\t \t \t \t \t", "")
-            # Split on tab
-            parts = line.strip().split('\t')
-            if len(parts) >= 2:
-                sources.append(parts[0].strip())
-                targets.append(parts[1].strip())
-        
-        # Create DataFrame
-        df = pd.DataFrame({'source': sources, 'target': targets})
-        
-        # Filter out rows where either source or target is empty
-        valid_rows = (df['source'].str.len() > 0) & (df['target'].str.len() > 0)
-        filtered_df = df[valid_rows]
-        
-        logger.info(f"Total pairs: {len(df)}")
-        logger.info(f"Valid pairs after filtering: {len(filtered_df)}")
-        logger.info(f"Removed {len(df) - len(filtered_df)} pairs with empty source or target")
-        
-        return filtered_df
+        # Try to open and read the file
+        logger.info("Reading file line by line...")
+        with open(tsv_file_path, 'r', encoding='utf-8', errors='replace') as f:
+            # Read the first few lines to identify the format
+            sample_lines = [f.readline() for _ in range(5)]
+            f.seek(0)  # Reset file pointer
+            
+            # Debug sample lines
+            logger.info("Sample lines from file:")
+            for i, line in enumerate(sample_lines):
+                logger.info(f"Line {i+1}: {line.strip()}")
+            
+            # Process the whole file
+            for line_num, line in enumerate(f, 1):
+                try:
+                    # Try to parse the line
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Split by tab
+                    parts = line.split('\t')
+                    
+                    # Check if we have at least two parts
+                    if len(parts) >= 2:
+                        src = parts[0].strip()
+                        tgt = parts[1].strip()
+                        
+                        # Check if both are non-empty
+                        if src and tgt:
+                            sources.append(src)
+                            targets.append(tgt)
+                    
+                    # Progress logging
+                    if line_num % 500000 == 0:
+                        logger.info(f"Processed {line_num} lines, found {len(sources)} valid pairs")
+                
+                except Exception as e:
+                    logger.warning(f"Error processing line {line_num}: {str(e)}")
+                    continue
+    
     except Exception as e:
-        logger.error(f"Error loading dataset: {str(e)}")
-        raise
+        logger.error(f"Error reading file: {str(e)}")
+    
+    # Create DataFrame
+    df = pd.DataFrame({'source': sources, 'target': targets})
+    
+    # Log statistics
+    logger.info(f"Total pairs found: {len(df)}")
+    
+    # Sample data
+    if len(df) > 0:
+        logger.info("\nSample data:")
+        for i in range(min(5, len(df))):
+            logger.info(f"Source: {df.iloc[i]['source']}")
+            logger.info(f"Target: {df.iloc[i]['target']}")
+    
+    return df
+
 
 # IMPROVED: Calculate BLEU score using NLTK with better handling for low-resource languages
 def calculate_bleu(reference, hypothesis):
@@ -639,7 +682,7 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
 
 # Main execution
 def main():
-    global tokenizer, full_df, TRAIN_SIZE, TEST_SIZE  # Add TRAIN_SIZE and TEST_SIZE here
+    global tokenizer, full_df, TRAIN_SIZE, TEST_SIZE
     
     try:
         # Create base output directory
@@ -650,13 +693,113 @@ def main():
         full_df = load_dataset(TSV_FILE_PATH)
         logger.info(f"Loaded {len(full_df)} translation pairs.")
         
-        # Check data quality
-        logger.info("\nData Sample:")
-        for i in range(min(3, len(full_df))):
-            logger.info(f"Source: {full_df.iloc[i]['source']}")
-            logger.info(f"Target: {full_df.iloc[i]['target']}")
-            logger.info("---")
+        # Check if we have any data
+        if len(full_df) == 0:
+            logger.error("No valid translation pairs found in the dataset. Please check the file format.")
+            
+            # Attempt to diagnose the issue
+            logger.info("\nAttempting to diagnose the dataset issue...")
+            try:
+                with open(TSV_FILE_PATH, 'r', encoding='utf-8', errors='replace') as f:
+                    header = f.readline().strip()
+                    logger.info(f"First line of file: {header}")
+                    
+                    # Check if it's a CSV instead of TSV
+                    if ',' in header and '\t' not in header:
+                        logger.info("File appears to be comma-separated rather than tab-separated.")
+                        logger.info("Please try changing the file format or modifying the separator in the code.")
+                    
+                    # Check if it might be a binary file
+                    if any(ord(c) > 127 for c in header[:20]):
+                        logger.info("File appears to contain binary data or non-UTF-8 characters.")
+                        logger.info("Please ensure the file is properly encoded in UTF-8.")
+                    
+                    # Check if it might be empty
+                    if not header:
+                        logger.info("File appears to be empty.")
+            except Exception as e:
+                logger.error(f"Error diagnosing file: {str(e)}")
+            
+            return
         
         # Make sure we have enough data
         if len(full_df) < TRAIN_SIZE + TEST_SIZE:
             logger.warning(f"Warning: Not enough data in the file. Need at least {TRAIN_SIZE + TEST_SIZE} examples, but found {len(full_df)}.")
+            
+            # Set reasonable defaults based on available data
+            total_examples = len(full_df)
+            test_ratio = 0.2  # 20% for testing
+            TEST_SIZE = min(TEST_SIZE, max(1, int(total_examples * test_ratio)))
+            TRAIN_SIZE = max(1, total_examples - TEST_SIZE)  # Rest for training
+            
+            logger.info(f"Adjusted dataset sizes: TRAIN_SIZE={TRAIN_SIZE}, TEST_SIZE={TEST_SIZE}")
+        
+        # Split the data
+        logger.info(f"Splitting data into training ({TRAIN_SIZE} examples) and testing ({TEST_SIZE} examples) sets...")
+        train_df, test_df = train_test_split(full_df, test_size=TEST_SIZE, train_size=TRAIN_SIZE, random_state=42)
+        logger.info(f"Training set size: {len(train_df)}")
+        logger.info(f"Test set size: {len(test_df)}")
+        
+        # Initialize tokenizer and model
+        logger.info("Initializing T5 tokenizer and model...")
+        tokenizer = T5Tokenizer.from_pretrained("t5-base")
+        model = T5ForConditionalGeneration.from_pretrained("t5-base")
+        
+        # Run iterations
+        all_metrics = []
+        for iteration in range(1, NUM_ITERATIONS + 1):
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Starting iteration {iteration}/{NUM_ITERATIONS}")
+            logger.info(f"{'='*50}")
+            
+            # Train for this iteration
+            model, tokenizer, metrics = train_iteration(iteration, tokenizer, model, train_df, test_df)
+            all_metrics.append(metrics)
+            
+            # Save metrics history
+            with open(f"{BASE_OUTPUT_DIR}/all_metrics.txt", "w") as f:
+                for i, m in enumerate(all_metrics, 1):
+                    f.write(f"Iteration {i} Metrics:\n")
+                    for key, value in m.items():
+                        f.write(f"{key}: {value}\n")
+                    f.write("\n")
+        
+        # Final testing on test data
+        logger.info("\nPerforming final evaluation on test set...")
+        test_results = test_final_model(model, tokenizer, test_df=test_df)
+        
+        # Create a best model symlink to the best iteration
+        best_iteration = np.argmax([m.get('bleu', 0) for m in all_metrics]) + 1
+        logger.info(f"Best model was from iteration {best_iteration} with BLEU score: {all_metrics[best_iteration-1].get('bleu', 0):.2f}")
+        
+        best_model_path = f"{BASE_OUTPUT_DIR}/iteration_{best_iteration}"
+        best_symlink = f"{BASE_OUTPUT_DIR}/best_model"
+        
+        # Create symlink on Unix/Linux or copy on Windows
+        if os.path.exists(best_symlink):
+            if os.path.isdir(best_symlink):
+                shutil.rmtree(best_symlink)
+            else:
+                os.remove(best_symlink)
+                
+        if hasattr(os, 'symlink'):
+            os.symlink(f"iteration_{best_iteration}", best_symlink, target_is_directory=True)
+            logger.info(f"Created symlink to best model at {best_symlink}")
+        else:
+            # For Windows, copy the directory instead
+            shutil.copytree(best_model_path, best_symlink)
+            logger.info(f"Copied best model to {best_symlink}")
+        
+        # Final message
+        logger.info("\nTraining complete!")
+        logger.info(f"Best model saved at: {best_symlink}")
+        logger.info(f"Final BLEU score: {test_results['bleu']:.2f}")
+        
+    except Exception as e:
+        logger.error(f"Error in main execution: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
+
+if __name__ == "__main__":
+    main()
