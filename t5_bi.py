@@ -80,8 +80,18 @@ def load_dataset(tsv_file_path):
                 sources.append(parts[0].strip())
                 targets.append(parts[1].strip())
         
-        logger.info(f"Successfully loaded {len(sources)} translation pairs")
-        return pd.DataFrame({'source': sources, 'target': targets})
+        # Create DataFrame
+        df = pd.DataFrame({'source': sources, 'target': targets})
+        
+        # Filter out rows where either source or target is empty
+        valid_rows = (df['source'].str.len() > 0) & (df['target'].str.len() > 0)
+        filtered_df = df[valid_rows]
+        
+        logger.info(f"Total pairs: {len(df)}")
+        logger.info(f"Valid pairs after filtering: {len(filtered_df)}")
+        logger.info(f"Removed {len(df) - len(filtered_df)} pairs with empty source or target")
+        
+        return filtered_df
     except Exception as e:
         logger.error(f"Error loading dataset: {str(e)}")
         raise
@@ -311,36 +321,6 @@ def compute_cycle_loss_e2k2e(model, tokenizer, batch, device):
     return avg_score
 
 # Custom Trainer with Bidirectional Cycle Loss and Improved Debugging
-class CycleConsistencyTrainer(Seq2SeqTrainer):
-    def __init__(self, model=None, args=None, data_collator=None, train_dataset=None,
-                 eval_dataset=None, tokenizer=None, compute_metrics=None, **kwargs):
-        super().__init__(
-            model=model,
-            args=args,
-            data_collator=data_collator,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
-            compute_metrics=compute_metrics,
-        )
-        self.cycle_losses_k2e2k = []
-        self.cycle_losses_e2k2e = []
-    
-    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
-        metrics = super().evaluate(
-            eval_dataset=eval_dataset,
-            ignore_keys=ignore_keys,
-            metric_key_prefix=metric_key_prefix
-        )
-        
-        # Calculate cycle loss on evaluation dataset
-        eval_dataloader = self.get_eval_dataloader(eval_dataset)
-        model = self.model.to(self.args.device)
-        model.eval()
-        
-        # Process batches for cycle loss
-    
-        # Custom Trainer with Bidirectional Cycle Loss and Improved Debugging
 class CycleConsistencyTrainer(Seq2SeqTrainer):
     def __init__(self, model=None, args=None, data_collator=None, train_dataset=None,
                  eval_dataset=None, tokenizer=None, compute_metrics=None, **kwargs):
@@ -658,9 +638,8 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
     }
 
 # Main execution
-# Main execution
 def main():
-    global tokenizer, full_df  # Make tokenizer and full_df available to other functions
+    global tokenizer, full_df, TRAIN_SIZE, TEST_SIZE  # Add TRAIN_SIZE and TEST_SIZE here
     
     try:
         # Create base output directory
@@ -681,94 +660,3 @@ def main():
         # Make sure we have enough data
         if len(full_df) < TRAIN_SIZE + TEST_SIZE:
             logger.warning(f"Warning: Not enough data in the file. Need at least {TRAIN_SIZE + TEST_SIZE} examples, but found {len(full_df)}.")
-            TRAIN_SIZE = int(len(full_df) * 0.8)  # Use 80% for training
-            TEST_SIZE = len(full_df) - TRAIN_SIZE  # Use 20% for testing
-            logger.info(f"Adjusted TRAIN_SIZE to {TRAIN_SIZE} and TEST_SIZE to {TEST_SIZE}")
-        
-        # Load tokenizer and model
-        logger.info("Loading T5 tokenizer and model...")
-        tokenizer = T5Tokenizer.from_pretrained("t5-base")
-        model = T5ForConditionalGeneration.from_pretrained("t5-base")
-        
-        # Track metrics across iterations
-        all_metrics = []
-        
-        # Create a fixed test set for final evaluation
-        final_test_df = full_df.sample(n=TEST_SIZE, random_state=999)
-        logger.info(f"Created final test set with {len(final_test_df)} examples")
-        
-        for iteration in range(1, NUM_ITERATIONS + 1):
-            logger.info(f"\n{'='*50}")
-            logger.info(f"Starting Iteration {iteration} of {NUM_ITERATIONS}")
-            logger.info(f"{'='*50}\n")
-            
-            # Sample new train and test sets for this iteration
-            sampled_df = full_df.sample(n=TRAIN_SIZE + TEST_SIZE, random_state=42 + iteration)
-            train_df = sampled_df.iloc[:TRAIN_SIZE]
-            test_df = sampled_df.iloc[TRAIN_SIZE:]
-            logger.info(f"Training set: {len(train_df)} examples")
-            logger.info(f"Test set: {len(test_df)} examples")
-            
-            # Train for this iteration
-            model, tokenizer, metrics = train_iteration(iteration, tokenizer, model, train_df, test_df)
-            all_metrics.append(metrics)
-        
-        # Save final model and tokenizer to the base directory
-        logger.info(f"Saving final model to {BASE_OUTPUT_DIR}...")
-        model.save_pretrained(BASE_OUTPUT_DIR)
-        tokenizer.save_pretrained(BASE_OUTPUT_DIR)
-        
-        # Summarize metrics across all iterations
-        logger.info("\nSummary of metrics across all iterations:")
-        summary_df = pd.DataFrame(all_metrics)
-        logger.info(summary_df.to_string())
-        summary_df.to_csv(f"{BASE_OUTPUT_DIR}/all_iterations_metrics.csv", index=False)
-        
-        # Plot metrics across iterations
-        try:
-            import matplotlib.pyplot as plt
-            plt.figure(figsize=(12, 8))
-            
-            plt.subplot(2, 1, 1)
-            plt.plot(range(1, NUM_ITERATIONS + 1), summary_df['bleu'], 'b-o', label='BLEU')
-            plt.xlabel('Iteration')
-            plt.ylabel('BLEU Score')
-            plt.title('BLEU Score Across Iterations')
-            plt.grid(True)
-            plt.legend()
-            
-            plt.subplot(2, 1, 2)
-            plt.plot(range(1, NUM_ITERATIONS + 1), summary_df['cycle_consistency'], 'r-o', label='Cycle Consistency')
-            plt.xlabel('Iteration')
-            plt.ylabel('Cycle Consistency Score')
-            plt.title('Cycle Consistency Score Across Iterations')
-            plt.grid(True)
-            plt.legend()
-            
-            plt.tight_layout()
-            plt.savefig(f"{BASE_OUTPUT_DIR}/metrics_across_iterations.png")
-            logger.info(f"Metrics plot saved to {BASE_OUTPUT_DIR}/metrics_across_iterations.png")
-        except ImportError:
-            logger.warning("Matplotlib not available, skipping metrics plot.")
-        
-        # Final evaluation on the fixed test set
-        logger.info("\nEvaluating final model on the fixed test set...")
-        final_metrics = test_final_model(model, tokenizer, test_df=final_test_df)
-        
-        logger.info("\nTraining and evaluation complete!")
-        logger.info(f"Final model saved to {BASE_OUTPUT_DIR}")
-        logger.info(f"Final BLEU score: {final_metrics['bleu']:.2f}")
-        
-    except Exception as e:
-        logger.error(f"Error in main execution: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.error(f"Fatal error: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
