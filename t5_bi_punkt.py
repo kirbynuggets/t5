@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import numpy as np
 import torch
@@ -40,7 +41,7 @@ torch.manual_seed(42)
 np.random.seed(42)
 
 # Configuration - CHANGE THESE VARIABLES
-TSV_FILE_PATH = "samanantar_4950k_filtered.tsv"  # REPLACE WITH YOUR FILE PATH
+TSV_FILE_PATH = "samanantar_4950k_filtered.tsv"  
 BASE_OUTPUT_DIR = "t5_khasi_english_model"
 MAX_SOURCE_LENGTH = 128
 MAX_TARGET_LENGTH = 128
@@ -60,8 +61,6 @@ IS_KHASI_TO_ENGLISH = True  # CHANGE THIS BASED ON YOUR DATASET DIRECTION
 SRC_PREFIX = "translate Khasi to English: " if IS_KHASI_TO_ENGLISH else "translate English to Khasi: "
 TGT_PREFIX = "translate English to Khasi: " if IS_KHASI_TO_ENGLISH else "translate Khasi to English: "
 
-# Load the dataset
-# Fix for the dataset loading function
 def load_dataset(tsv_file_path):
     logger.info(f"Loading dataset from {tsv_file_path}")
     
@@ -91,6 +90,13 @@ def load_dataset(tsv_file_path):
             for i, line in enumerate(sample_lines):
                 logger.info(f"Line {i+1}: {line.strip()}")
             
+            # Skip header line if present
+            first_line = f.readline().strip()
+            if first_line.lower() in ["en\tkha", "en					kha"]:
+                logger.info("Skipping header line")
+            else:
+                f.seek(0)  # Reset if no header
+            
             # Process the whole file
             for line_num, line in enumerate(f, 1):
                 try:
@@ -99,8 +105,8 @@ def load_dataset(tsv_file_path):
                     if not line:
                         continue
                     
-                    # Split by tab
-                    parts = line.split('\t')
+                    # Split by any number of tabs (handles multiple tabs)
+                    parts = re.split(r'\t+', line)
                     
                     # Check if we have at least two parts
                     if len(parts) >= 2:
@@ -594,16 +600,36 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
         test_df, tokenizer, MAX_SOURCE_LENGTH, MAX_TARGET_LENGTH, SRC_PREFIX
     )
     
-    # Create dataloader
+    # Define a custom collate function that handles 'original_source' and 'original_target'
+    def custom_collate_fn(batch):
+        # Extract 'original_source' and 'original_target' before collation
+        original_sources = [item.pop('original_source') for item in batch]
+        original_targets = [item.pop('original_target') for item in batch]
+        
+        # Use DataCollator for the rest of the items
+        collated_batch = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, 
+            model=model, 
+            padding=True
+        )(batch)
+        
+        # Add back the original texts as lists (not as tensors)
+        collated_batch['original_source'] = original_sources
+        collated_batch['original_target'] = original_targets
+        
+        return collated_batch
+    
+    # Create dataloader with custom collate function
     test_dataloader = DataLoader(
         test_dataset, 
         batch_size=BATCH_SIZE, 
-        collate_fn=DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding=True)
+        collate_fn=custom_collate_fn
     )
     
     # Collect predictions and references
     all_preds = []
     all_refs = []
+    all_sources = []
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -611,15 +637,15 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
     
     logger.info("Generating translations for test set...")
     for batch in test_dataloader:
-        # Move batch to device
-        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                for k, v in batch.items()}
+        # Move batch to device (only tensor elements)
+        batch_for_model = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                          for k, v in batch.items()}
         
         # Generate translations
         with torch.no_grad():
             outputs = model.generate(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
+                input_ids=batch_for_model["input_ids"],
+                attention_mask=batch_for_model["attention_mask"],
                 max_length=MAX_TARGET_LENGTH
             )
         
@@ -637,7 +663,7 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
         
         # Print some examples for debugging
         for i in range(min(3, len(preds))):
-            if "original_source" in batch:
+            if batch['original_source'] is not None:
                 logger.info(f"Source: {batch['original_source'][i]}")
             logger.info(f"Reference: {refs[i]}")
             logger.info(f"Prediction: {preds[i]}")
@@ -647,6 +673,8 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
         
         all_preds.extend(preds)
         all_refs.extend(refs)
+        if batch['original_source'] is not None:
+            all_sources.extend(batch['original_source'])
     
     # Calculate BLEU and other metrics
     bleu_scores = [calculate_bleu(ref, pred) for ref, pred in zip(all_refs, all_preds)]
@@ -669,6 +697,8 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
         # Save some example translations
         f.write("\nExample Translations:\n")
         for i in range(min(20, len(all_preds))):
+            if i < len(all_sources):
+                f.write(f"Source: {all_sources[i]}\n")
             f.write(f"Reference: {all_refs[i]}\n")
             f.write(f"Prediction: {all_preds[i]}\n")
             f.write(f"BLEU: {bleu_scores[i]:.2f}\n")
@@ -679,7 +709,6 @@ def test_final_model(model, tokenizer, test_file_path=None, test_df=None):
         "non_zero_percent": non_zero_percent,
         "bleu_scores": bleu_scores
     }
-
 # Main execution
 def main():
     global tokenizer, full_df, TRAIN_SIZE, TEST_SIZE
