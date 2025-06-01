@@ -108,7 +108,7 @@ This system serves as a foundation for low-resource language research and provid
 
 ## Acknowledgments
 
-This project was developed under the guidance of Dr. Kaustuv Nag at the Indian Institute of Information Technology Guwahati as part of advanced neural machine translation research for low-resource languages.
+This project was developed under the guidance of Dr. Kaustuv Nag at the Indian Institute of Information Technology Guwahati as part of advanced neural machine translation research for low-resource languages as part of AI4Bharat project funded by IIT Madras.
 
 ## License
 
